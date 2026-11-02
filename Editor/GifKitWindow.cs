@@ -6,7 +6,7 @@ using UnityEngine;
 public class GifKitWindow : EditorWindow
 {
     const string CaptureKey = "GifKit.Capture";
-    const string TileKey = "GifKit.Tile";
+    const string TileKey = "GifKit.Tile.2";
 
     static readonly string[] Tabs = { "Capture", "Tile" };
     static readonly string[] PresetNames =
@@ -31,10 +31,14 @@ public class GifKitWindow : EditorWindow
     [SerializeField] int tab;
     [SerializeField] GifKitSettings settings = new GifKitSettings();
     [SerializeField] GifKitTileSettings tile = new GifKitTileSettings();
+    [SerializeField] int tilePreset;
+    [SerializeField] bool playing = true;
 
     GifKitResult last;
+    GifKitTile generator;
     Texture2D preview;
     bool previewDirty = true;
+    int shownFrame = -1;
     Vector2 scroll;
 
     [MenuItem("Window/GIF Kit")]
@@ -49,11 +53,16 @@ public class GifKitWindow : EditorWindow
         if (tile == null) tile = new GifKitTileSettings();
         if (EditorPrefs.HasKey(CaptureKey)) EditorJsonUtility.FromJsonOverwrite(EditorPrefs.GetString(CaptureKey), settings);
         if (EditorPrefs.HasKey(TileKey)) EditorJsonUtility.FromJsonOverwrite(EditorPrefs.GetString(TileKey), tile);
+        if (tile.layers == null || tile.layers.Count == 0) tile = GifKitTilePresets.Create(0);
         previewDirty = true;
+        EditorApplication.update += Tick;
+        Undo.undoRedoPerformed += MarkDirty;
     }
 
     void OnDisable()
     {
+        EditorApplication.update -= Tick;
+        Undo.undoRedoPerformed -= MarkDirty;
         EditorPrefs.SetString(CaptureKey, EditorJsonUtility.ToJson(settings));
         EditorPrefs.SetString(TileKey, EditorJsonUtility.ToJson(tile));
         if (preview != null) DestroyImmediate(preview);
@@ -62,6 +71,17 @@ public class GifKitWindow : EditorWindow
     void OnInspectorUpdate()
     {
         if (GifKitCapture.Busy) Repaint();
+    }
+
+    void Tick()
+    {
+        if (tab == 1 && playing && generator != null && CurrentFrame() != shownFrame) Repaint();
+    }
+
+    void MarkDirty()
+    {
+        previewDirty = true;
+        Repaint();
     }
 
     void OnGUI()
@@ -114,7 +134,8 @@ public class GifKitWindow : EditorWindow
         }
 
         EditorGUILayout.Space();
-        PaletteGUI();
+        settings.paletteMode = (GifKitPaletteMode)EditorGUILayout.EnumPopup("Palette", settings.paletteMode);
+        if (settings.paletteMode == GifKitPaletteMode.Fixed) settings.palette = ColorsGUI(settings.palette, 1);
 
         EditorGUILayout.Space();
         settings.overlay = (Texture2D)EditorGUILayout.ObjectField("Overlay", settings.overlay, typeof(Texture2D), false);
@@ -143,28 +164,303 @@ public class GifKitWindow : EditorWindow
         }
     }
 
-    void PaletteGUI()
+    void TileGUI()
     {
-        settings.paletteMode = (GifKitPaletteMode)EditorGUILayout.EnumPopup("Palette", settings.paletteMode);
-        if (settings.paletteMode != GifKitPaletteMode.Fixed) return;
+        Undo.RecordObject(this, "Edit tile");
+        EditorGUI.BeginChangeCheck();
 
-        var colors = new List<Color>(settings.palette ?? new Color[0]);
+        EditorGUILayout.BeginHorizontal();
+        tilePreset = EditorGUILayout.Popup("Preset", tilePreset, GifKitTilePresets.Names);
+        if (GUILayout.Button("Load", GUILayout.Width(60)))
+        {
+            tile = GifKitTilePresets.Create(tilePreset);
+            GUI.changed = true;
+        }
+        EditorGUILayout.EndHorizontal();
+
+        EditorGUILayout.Space();
+        tile.width = Mathf.Clamp(EditorGUILayout.IntField("Width", tile.width), 8, 1024);
+        tile.height = Mathf.Clamp(EditorGUILayout.IntField("Height", tile.height), 8, 1024);
+        tile.pixelScale = EditorGUILayout.IntSlider("Pixel scale", tile.pixelScale, 1, 8);
+        tile.frames = EditorGUILayout.IntSlider("Frames", tile.frames, 2, 256);
+        tile.fps = EditorGUILayout.IntSlider("FPS", tile.fps, 1, 50);
+        EditorGUILayout.LabelField(" ", $"{tile.width * tile.pixelScale} x {tile.height * tile.pixelScale} px, {(float)tile.frames / tile.fps:0.0} s loop", EditorStyles.miniLabel);
+
+        EditorGUILayout.Space();
+        EditorGUILayout.LabelField("Palette", EditorStyles.boldLabel);
+        tile.palette = ColorsGUI(tile.palette, 1);
+        var source = (Texture2D)EditorGUILayout.ObjectField("Colours from texture", null, typeof(Texture2D), false);
+        if (source != null) tile.palette = Colors(source);
+
+        EditorGUILayout.Space();
+        EditorGUILayout.LabelField("Layers", EditorStyles.boldLabel);
+        int move = -1, direction = 0, remove = -1, duplicate = -1;
+        for (int i = 0; i < tile.layers.Count; i++) LayerGUI(i, ref move, ref direction, ref remove, ref duplicate);
+        if (move >= 0)
+        {
+            var layer = tile.layers[move];
+            tile.layers.RemoveAt(move);
+            tile.layers.Insert(move + direction, layer);
+        }
+        if (duplicate >= 0) tile.layers.Insert(duplicate + 1, tile.layers[duplicate].Copy());
+        if (remove >= 0) tile.layers.RemoveAt(remove);
+
+        EditorGUILayout.BeginHorizontal();
+        if (GUILayout.Button("Add layer"))
+        {
+            var menu = new GenericMenu();
+            foreach (GifKitLayerType type in System.Enum.GetValues(typeof(GifKitLayerType)))
+            {
+                var picked = type;
+                menu.AddItem(new GUIContent(type.ToString()), false, () => AddLayer(picked));
+            }
+            menu.ShowAsContext();
+        }
+        if (GUILayout.Button("Shuffle all seeds"))
+            foreach (var layer in tile.layers) layer.seed = NewSeed();
+        EditorGUILayout.EndHorizontal();
+
+        if (EditorGUI.EndChangeCheck()) previewDirty = true;
+
+        EditorGUILayout.Space();
+        PreviewGUI();
+
+        EditorGUILayout.Space();
+        OutputGUI(ref tile.fileName);
+        EditorGUILayout.BeginHorizontal();
+        if (GUILayout.Button("Save PNG", GUILayout.Height(28))) last = Generator().Save(settings.outputFolder, false);
+        if (GUILayout.Button("Save GIF", GUILayout.Height(28))) last = Generator().Save(settings.outputFolder, true);
+        if (GUILayout.Button("Save texture asset", GUILayout.Height(28)))
+        {
+            string path = EditorUtility.SaveFilePanelInProject("Save tile texture", tile.fileName, "png", "Saves the first frame as a repeating, point-filtered texture.");
+            if (!string.IsNullOrEmpty(path)) last = Generator().SaveAsset(path);
+            GUIUtility.ExitGUI();
+        }
+        EditorGUILayout.EndHorizontal();
+    }
+
+    void LayerGUI(int index, ref int move, ref int direction, ref int remove, ref int duplicate)
+    {
+        var layer = tile.layers[index];
+        EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+        EditorGUILayout.BeginHorizontal();
+        layer.enabled = EditorGUILayout.Toggle(layer.enabled, GUILayout.Width(16));
+        layer.expanded = EditorGUILayout.Foldout(layer.expanded, $"{index + 1}. {LayerTitle(layer)}", true);
+        GUILayout.FlexibleSpace();
+        using (new EditorGUI.DisabledScope(index == 0))
+        {
+            if (GUILayout.Button("↑", EditorStyles.miniButtonLeft, GUILayout.Width(24)))
+            {
+                move = index;
+                direction = -1;
+            }
+        }
+        using (new EditorGUI.DisabledScope(index == tile.layers.Count - 1))
+        {
+            if (GUILayout.Button("↓", EditorStyles.miniButtonMid, GUILayout.Width(24)))
+            {
+                move = index;
+                direction = 1;
+            }
+        }
+        if (GUILayout.Button("Copy", EditorStyles.miniButtonMid, GUILayout.Width(42))) duplicate = index;
+        if (GUILayout.Button("Remove", EditorStyles.miniButtonRight, GUILayout.Width(56))) remove = index;
+        EditorGUILayout.EndHorizontal();
+
+        if (layer.expanded)
+        {
+            EditorGUI.indentLevel++;
+            layer.color = ColorIndexGUI("Colour", layer.color);
+            layer.drift = EditorGUILayout.Vector2IntField(new GUIContent("Move per loop", "Whole tiles per loop, positive is right and down"), layer.drift);
+            EditorGUILayout.BeginHorizontal();
+            layer.seed = EditorGUILayout.IntField("Seed", layer.seed);
+            if (GUILayout.Button("Shuffle", GUILayout.Width(60))) layer.seed = NewSeed();
+            EditorGUILayout.EndHorizontal();
+
+            switch (layer.type)
+            {
+                case GifKitLayerType.Noise: NoiseGUI(layer); break;
+                case GifKitLayerType.Particles: ParticlesGUI(layer); break;
+                case GifKitLayerType.Pattern: PatternGUI(layer); break;
+                default: SpritesGUI(layer); break;
+            }
+            EditorGUI.indentLevel--;
+        }
+        EditorGUILayout.EndVertical();
+    }
+
+    void NoiseGUI(GifKitLayer layer)
+    {
+        layer.scale = EditorGUILayout.IntSlider("Scale", layer.scale, 1, 16);
+        layer.cutoff = DoubleSlider("Cutoff", layer.cutoff, 0f, 1f);
+        layer.dither = (GifKitDither)EditorGUILayout.EnumPopup("Dither", layer.dither);
+        if (layer.dither == GifKitDither.None) return;
+        layer.ramp = DoubleSlider("Ramp", layer.ramp, 0.05f, 5f);
+        layer.density = DoubleSlider("Max density", layer.density, 0f, 1f);
+    }
+
+    void ParticlesGUI(GifKitLayer layer)
+    {
+        layer.shape = (GifKitShape)EditorGUILayout.EnumPopup("Shape", layer.shape);
+        layer.count = EditorGUILayout.IntSlider("Count", layer.count, 0, 1000);
+        layer.minSize = EditorGUILayout.IntSlider("Min size", layer.minSize, 1, 16);
+        layer.maxSize = EditorGUILayout.IntSlider("Max size", Mathf.Max(layer.minSize, layer.maxSize), layer.minSize, 16);
+        layer.sway = EditorGUILayout.IntSlider("Sway", layer.sway, 0, 16);
+        layer.twinkle = EditorGUILayout.Toggle("Twinkle", layer.twinkle);
+        if (layer.shape == GifKitShape.Streak) layer.length = EditorGUILayout.IntSlider("Length", layer.length, 1, 64);
+        if (layer.shape == GifKitShape.Sprite) SpriteListGUI(layer);
+    }
+
+    void PatternGUI(GifKitLayer layer)
+    {
+        layer.pattern = (GifKitPattern)EditorGUILayout.EnumPopup("Pattern", layer.pattern);
+        layer.cell = EditorGUILayout.IntSlider("Size", layer.cell, 2, 256);
+        if (layer.pattern != GifKitPattern.Checker)
+            layer.thickness = EditorGUILayout.IntSlider("Thickness", layer.thickness, 1, layer.cell);
+    }
+
+    void SpritesGUI(GifKitLayer layer)
+    {
+        SpriteListGUI(layer);
+        layer.spacing = EditorGUILayout.Vector2IntField("Spacing", layer.spacing);
+        layer.stagger = EditorGUILayout.Toggle("Stagger rows", layer.stagger);
+    }
+
+    void SpriteListGUI(GifKitLayer layer)
+    {
+        var sprites = new List<Texture2D>(layer.sprites ?? new Texture2D[0]);
         int remove = -1;
-        for (int i = 0; i < colors.Count; i++)
+        for (int i = 0; i < sprites.Count; i++)
         {
             EditorGUILayout.BeginHorizontal();
-            colors[i] = EditorGUILayout.ColorField(new GUIContent($"Colour {i + 1}"), colors[i], true, false, false);
+            sprites[i] = (Texture2D)EditorGUILayout.ObjectField($"Sprite {i + 1}", sprites[i], typeof(Texture2D), false);
             if (GUILayout.Button("-", GUILayout.Width(22))) remove = i;
             EditorGUILayout.EndHorizontal();
         }
-        if (remove >= 0) colors.RemoveAt(remove);
+        if (remove >= 0) sprites.RemoveAt(remove);
+        var added = (Texture2D)EditorGUILayout.ObjectField(sprites.Count == 0 ? "Sprite" : "Add sprite", null, typeof(Texture2D), false);
+        if (added != null) sprites.Add(added);
+        if (sprites.Count == 0) EditorGUILayout.LabelField(" ", "No sprite yet, drawing a diamond", EditorStyles.miniLabel);
+        layer.sprites = sprites.ToArray();
+        layer.spriteScale = EditorGUILayout.IntSlider("Sprite scale", layer.spriteScale, 1, 8);
+        layer.tint = EditorGUILayout.Toggle("Tint with colour", layer.tint);
+    }
+
+    void PreviewGUI()
+    {
+        var current = Generator();
+        foreach (var warning in current.Warnings) EditorGUILayout.HelpBox(warning, MessageType.Warning);
+
+        EditorGUILayout.BeginHorizontal();
+        EditorGUILayout.LabelField("Preview", EditorStyles.boldLabel);
+        playing = GUILayout.Toggle(playing, playing ? "Pause" : "Play", EditorStyles.miniButton, GUILayout.Width(60));
+        EditorGUILayout.EndHorizontal();
+
+        int frame = playing ? CurrentFrame() : 0;
+        if (frame != shownFrame)
+        {
+            current.Draw(preview, frame);
+            shownFrame = frame;
+        }
+        var rect = GUILayoutUtility.GetRect(256f, 320f, GUILayout.ExpandWidth(true));
+        float scaledWidth = current.Width * current.Scale;
+        float scaledHeight = current.Height * current.Scale;
+        GUI.DrawTextureWithTexCoords(rect, preview, new Rect(0f, 0f, rect.width / scaledWidth, rect.height / scaledHeight));
+        EditorGUILayout.LabelField(" ", "Repeated to show the seams line up", EditorStyles.miniLabel);
+    }
+
+    GifKitTile Generator()
+    {
+        if (!previewDirty && generator != null && preview != null) return generator;
+        generator = new GifKitTile(tile);
+        if (preview != null) DestroyImmediate(preview);
+        preview = generator.CreatePreview();
+        shownFrame = -1;
+        previewDirty = false;
+        return generator;
+    }
+
+    int CurrentFrame() => (int)(EditorApplication.timeSinceStartup * Mathf.Max(1, tile.fps)) % Mathf.Max(1, tile.frames);
+
+    void AddLayer(GifKitLayerType type)
+    {
+        Undo.RecordObject(this, "Add layer");
+        tile.layers.Add(GifKitLayer.Create(type, Mathf.Min(1, tile.palette.Length - 1), NewSeed()));
+        previewDirty = true;
+        Repaint();
+    }
+
+    static string LayerTitle(GifKitLayer layer)
+    {
+        switch (layer.type)
+        {
+            case GifKitLayerType.Particles: return $"Particles ({layer.shape}, {layer.count})";
+            case GifKitLayerType.Pattern: return $"Pattern ({layer.pattern})";
+            case GifKitLayerType.Sprites: return "Sprites";
+            default: return "Noise";
+        }
+    }
+
+    int ColorIndexGUI(string label, int index)
+    {
+        int count = Mathf.Max(1, tile.palette.Length);
+        var names = new string[count];
+        for (int i = 0; i < count; i++) names[i] = i == 0 ? "1 (background)" : (i + 1).ToString();
+        EditorGUILayout.BeginHorizontal();
+        index = EditorGUILayout.Popup(label, Mathf.Clamp(index, 0, count - 1), names);
+        var swatch = GUILayoutUtility.GetRect(18f, 18f, GUILayout.Width(18f));
+        if (tile.palette.Length > 0) EditorGUI.DrawRect(swatch, tile.palette[index]);
+        EditorGUILayout.EndHorizontal();
+        return index;
+    }
+
+    static Color[] ColorsGUI(Color[] colors, int minimum)
+    {
+        var list = new List<Color>(colors ?? new Color[0]);
+        int remove = -1;
+        for (int i = 0; i < list.Count; i++)
+        {
+            EditorGUILayout.BeginHorizontal();
+            list[i] = EditorGUILayout.ColorField(new GUIContent($"Colour {i + 1}"), list[i], true, false, false);
+            using (new EditorGUI.DisabledScope(list.Count <= minimum))
+            {
+                if (GUILayout.Button("-", GUILayout.Width(22))) remove = i;
+            }
+            EditorGUILayout.EndHorizontal();
+        }
+        if (remove >= 0) list.RemoveAt(remove);
 
         EditorGUILayout.BeginHorizontal();
         GUILayout.Space(EditorGUIUtility.labelWidth);
-        if (GUILayout.Button("Add colour") && colors.Count < 255) colors.Add(Color.white);
+        if (GUILayout.Button("Add colour") && list.Count < 255) list.Add(list.Count > 0 ? list[list.Count - 1] : Color.white);
         EditorGUILayout.EndHorizontal();
-        settings.palette = colors.ToArray();
+        return list.ToArray();
     }
+
+    static Color[] Colors(Texture2D texture)
+    {
+        var pixels = GifKitImage.ReadTexture(texture, out _, out _);
+        var seen = new HashSet<int>();
+        var colors = new List<Color>();
+        foreach (var pixel in pixels)
+        {
+            if (pixel.a < 128) continue;
+            int key = (pixel.r << 16) | (pixel.g << 8) | pixel.b;
+            if (!seen.Add(key)) continue;
+            colors.Add(new Color32(pixel.r, pixel.g, pixel.b, 255));
+            if (colors.Count == 32) break;
+        }
+        return colors.Count > 0 ? colors.ToArray() : new[] { Color.black };
+    }
+
+    static double DoubleSlider(string label, double value, float min, float max)
+    {
+        float shown = (float)value;
+        float picked = EditorGUILayout.Slider(label, shown, min, max);
+        return picked == shown ? value : picked;
+    }
+
+    static int NewSeed() => Random.Range(1, int.MaxValue);
 
     void OutputGUI(ref string fileName)
     {
@@ -178,52 +474,6 @@ public class GifKitWindow : EditorWindow
         }
         EditorGUILayout.EndHorizontal();
         fileName = EditorGUILayout.TextField("File name", fileName);
-    }
-
-    void TileGUI()
-    {
-        EditorGUI.BeginChangeCheck();
-        tile.size = EditorGUILayout.IntSlider("Tile size", tile.size, 16, 512);
-        tile.pixelScale = EditorGUILayout.IntSlider("Pixel scale", tile.pixelScale, 1, 8);
-        tile.background = EditorGUILayout.ColorField(new GUIContent("Background"), tile.background, true, false, false);
-        tile.foreground = EditorGUILayout.ColorField(new GUIContent("Foreground"), tile.foreground, true, false, false);
-
-        EditorGUILayout.Space();
-        tile.fog = EditorGUILayout.Toggle("Dithered fog", tile.fog);
-        if (tile.fog)
-        {
-            tile.fogDensity = EditorGUILayout.Slider("Fog density", tile.fogDensity, 0f, 0.5f);
-            tile.fogScale = EditorGUILayout.IntSlider("Fog scale", tile.fogScale, 1, 12);
-        }
-
-        EditorGUILayout.Space();
-        tile.smallFlakes = EditorGUILayout.IntSlider("Small flakes", tile.smallFlakes, 0, 500);
-        tile.largeFlakes = EditorGUILayout.IntSlider("Large flakes", tile.largeFlakes, 0, 300);
-        tile.fastFlakes = EditorGUILayout.IntSlider("Fast flakes", tile.fastFlakes, 0, 300);
-        tile.frames = EditorGUILayout.IntSlider("Frames", tile.frames, 2, 256);
-        tile.fps = EditorGUILayout.IntSlider("FPS", tile.fps, 1, 50);
-        tile.seed = EditorGUILayout.IntField("Seed", tile.seed);
-        if (EditorGUI.EndChangeCheck()) previewDirty = true;
-
-        int pixels = tile.size * tile.pixelScale;
-        EditorGUILayout.LabelField(" ", $"{pixels} x {pixels} px, {(float)tile.frames / tile.fps:0.0} s loop", EditorStyles.miniLabel);
-
-        if (previewDirty || preview == null)
-        {
-            if (preview != null) DestroyImmediate(preview);
-            preview = new GifKitTile(tile).Preview();
-            previewDirty = false;
-        }
-        var rect = GUILayoutUtility.GetRect(256f, 256f, GUILayout.ExpandWidth(true));
-        float texel = tile.size * tile.pixelScale;
-        GUI.DrawTextureWithTexCoords(rect, preview, new Rect(0f, 0f, rect.width / texel, rect.height / texel));
-
-        EditorGUILayout.Space();
-        OutputGUI(ref tile.fileName);
-        EditorGUILayout.BeginHorizontal();
-        if (GUILayout.Button("Save PNG", GUILayout.Height(28))) last = new GifKitTile(tile).Save(settings.outputFolder, false);
-        if (GUILayout.Button("Save GIF", GUILayout.Height(28))) last = new GifKitTile(tile).Save(settings.outputFolder, true);
-        EditorGUILayout.EndHorizontal();
     }
 
     void ResultGUI()

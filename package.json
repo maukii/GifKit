@@ -1,8 +1,8 @@
 {
   "name": "com.maukii.gifkit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "displayName": "GIF Kit",
-  "description": "Record seamless looping GIFs and stills from play mode, and generate tiling backgrounds, for itch.io and other store pages. Editor only, nothing ends up in builds.",
+  "description": "Record seamless looping GIFs and stills from play mode, and build layered tiling backgrounds, for itch.io and other store pages. Editor only, nothing ends up in builds.",
   "unity": "2022.3",
   "author": {
     "name": "maukii"

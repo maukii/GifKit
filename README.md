@@ -52,15 +52,32 @@ Particles that live longer than the loop work too, the snow in the banner lives 
 
 ## Tile
 
-Generates a seamless background tile from dithered fog and snow-like flakes
+Builds seamless, looping backgrounds from a stack of layers, for itch.io pages or your own menus
 
-The flakes wrap at the edges and fall a whole number of tiles per loop, so the GIF tiles in space and loops in time
+Every layer wraps at the tile edges and every movement completes whole cycles per loop, so whatever you stack tiles in space and loops in time
 
-Pick two colours, a size and a pixel scale, then save a PNG or GIF and use it as an itch.io page background with repeat on
+![Tile presets](Documentation~/tile-presets.png)
+
+*The ten presets: Snow, Rain, Starfield, Embers, Bubbles, Clouds, Checker, Stripes, Wallpaper and Neon grid*
+
+Start from a preset or an empty stack, then add layers
+
+- **Noise** - clouds, fog, water or lava from tileable noise, drawn with hard edges or a 2x2, 4x4 or 8x8 Bayer dither
+- **Particles** - snow, rain streaks, rising embers or bubbles, twinkling stars, drifting leaves, as squares, dots, pluses, streaks or your own sprites
+- **Pattern** - checker, stripes, diagonal stripes, dots, grid or bricks
+- **Sprites** - your own sprites repeated on a staggered grid, the classic itch.io wallpaper (a diamond stands in until you add one)
+
+Each layer picks a colour from the palette, how many whole tiles it moves per loop and its own seed, so shuffling one layer never changes the others
+
+The palette can have any number of colours, typed in or taken from a texture
+
+The preview plays the loop and repeats the tile so you can check the seams, and a warning appears if a pattern or sprite spacing doesn't divide the tile size
+
+Save a PNG, a GIF, or a repeating point-filtered texture asset for use inside the game
 
 ![VIGIL page background](Documentation~/vigil-background.gif)
 
-*VIGIL's page background, one tile (512 x 512, 128 frames, 278 KB)*
+*The Snow preset, which is VIGIL's page background pixel for pixel (512 x 512, 128 frames, 282 KB)*
 
 ## GIF details
 
